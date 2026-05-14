@@ -131,16 +131,30 @@ class TestGetTools:
             yield mock_get_version, mock_is_compatible
 
     @pytest.mark.asyncio
-    async def test_get_tools_multi_mode_returns_all_tools(self, mock_tool_registry):
-        """Test that multi mode returns all tools with base fields intact."""
+    async def test_get_tools_multi_mode_applies_tool_filters_like_single(self, mock_tool_registry):
+        """Multi mode applies category/env filters; returns enabled dict keyed by display name."""
         from mcp_server_opensearch.global_state import set_mode
 
-        set_mode('multi')  # Set mode to multi for this test
+        set_mode('multi')
 
         result = await get_tools(mock_tool_registry)
-        assert result == mock_tool_registry
+        # Default enabled category is core_tools only — skills tools are excluded
+        assert set(result.keys()) == {'ListIndexTool', 'SearchIndexTool'}
+        assert 'DataDistributionTool' not in result
+        assert 'LogPatternAnalysisTool' not in result
         assert 'param1' in result['ListIndexTool']['input_schema']['properties']
         assert 'opensearch_cluster_name' in result['SearchIndexTool']['input_schema']['properties']
+
+    @pytest.mark.asyncio
+    @patch.dict('os.environ', {'OPENSEARCH_DISABLED_TOOLS': 'SearchIndexTool'}, clear=False)
+    async def test_get_tools_multi_mode_respects_disabled_tools_env(self, mock_tool_registry):
+        """Multi mode honors OPENSEARCH_DISABLED_TOOLS like single mode."""
+        from mcp_server_opensearch.global_state import set_mode
+
+        set_mode('multi')
+        result = await get_tools(mock_tool_registry)
+        assert set(result.keys()) == {'ListIndexTool'}
+        assert 'SearchIndexTool' not in result
 
     @pytest.mark.asyncio
     async def test_get_tools_single_mode_filters_and_removes_base_fields(
@@ -165,8 +179,7 @@ class TestGetTools:
         assert 'SearchIndexTool' not in result
         assert 'param1' in result['ListIndexTool']['input_schema']['properties']
         assert (
-            'opensearch_cluster_name'
-            not in result['ListIndexTool']['input_schema']['properties']
+            'opensearch_cluster_name' not in result['ListIndexTool']['input_schema']['properties']
         )
 
     @pytest.mark.asyncio
@@ -237,7 +250,9 @@ class TestGetTools:
         )
 
     @pytest.mark.asyncio
-    async def test_get_tools_skills_tools_version_filtering(self, mock_tool_registry, mock_patches):
+    async def test_get_tools_skills_tools_version_filtering(
+        self, mock_tool_registry, mock_patches
+    ):
         """Test that skills tools are filtered based on version compatibility."""
         mock_get_version, mock_is_compatible = mock_patches
 
@@ -262,7 +277,9 @@ class TestGetTools:
         assert 'SearchIndexTool' in result
 
     @pytest.mark.asyncio
-    async def test_get_tools_skills_tools_compatible_version(self, mock_tool_registry, mock_patches):
+    async def test_get_tools_skills_tools_compatible_version(
+        self, mock_tool_registry, mock_patches
+    ):
         """Test that skills tools are excluded by default even when version is compatible,
         since they belong to the 'skills' category which is not enabled by default."""
         mock_get_version, mock_is_compatible = mock_patches
@@ -494,7 +511,10 @@ class TestProcessToolFilter:
             'SampleQuerySetTool': {'display_name': 'SampleQuerySetTool', 'http_methods': 'POST'},
             'DeleteQuerySetTool': {'display_name': 'DeleteQuerySetTool', 'http_methods': 'DELETE'},
             'GetJudgmentListTool': {'display_name': 'GetJudgmentListTool', 'http_methods': 'GET'},
-            'CreateJudgmentListTool': {'display_name': 'CreateJudgmentListTool', 'http_methods': 'PUT'},
+            'CreateJudgmentListTool': {
+                'display_name': 'CreateJudgmentListTool',
+                'http_methods': 'PUT',
+            },
             'CreateUBIJudgmentListTool': {
                 'display_name': 'CreateUBIJudgmentListTool',
                 'http_methods': 'PUT',
@@ -503,14 +523,35 @@ class TestProcessToolFilter:
                 'display_name': 'CreateLLMJudgmentListTool',
                 'http_methods': 'PUT',
             },
-            'DeleteJudgmentListTool': {'display_name': 'DeleteJudgmentListTool', 'http_methods': 'DELETE'},
+            'DeleteJudgmentListTool': {
+                'display_name': 'DeleteJudgmentListTool',
+                'http_methods': 'DELETE',
+            },
             'GetExperimentTool': {'display_name': 'GetExperimentTool', 'http_methods': 'GET'},
-            'CreateExperimentTool': {'display_name': 'CreateExperimentTool', 'http_methods': 'PUT'},
-            'DeleteExperimentTool': {'display_name': 'DeleteExperimentTool', 'http_methods': 'DELETE'},
-            'SearchQuerySetsTool': {'display_name': 'SearchQuerySetsTool', 'http_methods': 'GET, POST'},
-            'SearchSearchConfigurationsTool': {'display_name': 'SearchSearchConfigurationsTool', 'http_methods': 'GET, POST'},
-            'SearchJudgmentsTool': {'display_name': 'SearchJudgmentsTool', 'http_methods': 'GET, POST'},
-            'SearchExperimentsTool': {'display_name': 'SearchExperimentsTool', 'http_methods': 'GET, POST'},
+            'CreateExperimentTool': {
+                'display_name': 'CreateExperimentTool',
+                'http_methods': 'PUT',
+            },
+            'DeleteExperimentTool': {
+                'display_name': 'DeleteExperimentTool',
+                'http_methods': 'DELETE',
+            },
+            'SearchQuerySetsTool': {
+                'display_name': 'SearchQuerySetsTool',
+                'http_methods': 'GET, POST',
+            },
+            'SearchSearchConfigurationsTool': {
+                'display_name': 'SearchSearchConfigurationsTool',
+                'http_methods': 'GET, POST',
+            },
+            'SearchJudgmentsTool': {
+                'display_name': 'SearchJudgmentsTool',
+                'http_methods': 'GET, POST',
+            },
+            'SearchExperimentsTool': {
+                'display_name': 'SearchExperimentsTool',
+                'http_methods': 'GET, POST',
+            },
         }
         process_tool_filter(tool_registry=registry, allow_write=True)
 
@@ -557,7 +598,10 @@ class TestProcessToolFilter:
             'SampleQuerySetTool': {'display_name': 'SampleQuerySetTool', 'http_methods': 'POST'},
             'DeleteQuerySetTool': {'display_name': 'DeleteQuerySetTool', 'http_methods': 'DELETE'},
             'GetJudgmentListTool': {'display_name': 'GetJudgmentListTool', 'http_methods': 'GET'},
-            'CreateJudgmentListTool': {'display_name': 'CreateJudgmentListTool', 'http_methods': 'PUT'},
+            'CreateJudgmentListTool': {
+                'display_name': 'CreateJudgmentListTool',
+                'http_methods': 'PUT',
+            },
             'CreateUBIJudgmentListTool': {
                 'display_name': 'CreateUBIJudgmentListTool',
                 'http_methods': 'PUT',
@@ -566,14 +610,35 @@ class TestProcessToolFilter:
                 'display_name': 'CreateLLMJudgmentListTool',
                 'http_methods': 'PUT',
             },
-            'DeleteJudgmentListTool': {'display_name': 'DeleteJudgmentListTool', 'http_methods': 'DELETE'},
+            'DeleteJudgmentListTool': {
+                'display_name': 'DeleteJudgmentListTool',
+                'http_methods': 'DELETE',
+            },
             'GetExperimentTool': {'display_name': 'GetExperimentTool', 'http_methods': 'GET'},
-            'CreateExperimentTool': {'display_name': 'CreateExperimentTool', 'http_methods': 'PUT'},
-            'DeleteExperimentTool': {'display_name': 'DeleteExperimentTool', 'http_methods': 'DELETE'},
-            'SearchQuerySetsTool': {'display_name': 'SearchQuerySetsTool', 'http_methods': 'GET, POST'},
-            'SearchSearchConfigurationsTool': {'display_name': 'SearchSearchConfigurationsTool', 'http_methods': 'GET, POST'},
-            'SearchJudgmentsTool': {'display_name': 'SearchJudgmentsTool', 'http_methods': 'GET, POST'},
-            'SearchExperimentsTool': {'display_name': 'SearchExperimentsTool', 'http_methods': 'GET, POST'},
+            'CreateExperimentTool': {
+                'display_name': 'CreateExperimentTool',
+                'http_methods': 'PUT',
+            },
+            'DeleteExperimentTool': {
+                'display_name': 'DeleteExperimentTool',
+                'http_methods': 'DELETE',
+            },
+            'SearchQuerySetsTool': {
+                'display_name': 'SearchQuerySetsTool',
+                'http_methods': 'GET, POST',
+            },
+            'SearchSearchConfigurationsTool': {
+                'display_name': 'SearchSearchConfigurationsTool',
+                'http_methods': 'GET, POST',
+            },
+            'SearchJudgmentsTool': {
+                'display_name': 'SearchJudgmentsTool',
+                'http_methods': 'GET, POST',
+            },
+            'SearchExperimentsTool': {
+                'display_name': 'SearchExperimentsTool',
+                'http_methods': 'GET, POST',
+            },
         }
         process_tool_filter(
             tool_registry=registry,
@@ -851,6 +916,34 @@ class TestMultiOnlyFilter:
     @pytest.mark.asyncio
     async def test_multi_only_tool_included_in_multi_mode(self, registry_with_multi_only):
         """Test that multi_only tools are included when running in multi mode."""
+        from mcp_server_opensearch.global_state import set_mode
+
+        set_mode('multi')
+
+        result = await get_tools(registry_with_multi_only)
+
+        assert 'ListIndexTool' in result
+        assert 'ListClustersTool' in result
+
+    @pytest.mark.asyncio
+    @patch.dict('os.environ', {'OPENSEARCH_DISABLED_TOOLS': 'ListClustersTool'}, clear=False)
+    async def test_multi_only_tool_can_be_explicitly_disabled(self, registry_with_multi_only):
+        """multi_only tools bypass the category filter but still respect explicit disables."""
+        from mcp_server_opensearch.global_state import set_mode
+
+        set_mode('multi')
+
+        result = await get_tools(registry_with_multi_only)
+
+        assert 'ListIndexTool' in result
+        assert 'ListClustersTool' not in result
+
+    @pytest.mark.asyncio
+    @patch.dict('os.environ', {'OPENSEARCH_ENABLED_TOOLS': 'ListIndexTool'}, clear=False)
+    async def test_multi_only_tool_survives_restrictive_enabled_list(
+        self, registry_with_multi_only
+    ):
+        """multi_only tools survive even when the enabled allowlist excludes them."""
         from mcp_server_opensearch.global_state import set_mode
 
         set_mode('multi')

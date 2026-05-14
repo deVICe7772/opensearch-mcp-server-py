@@ -130,6 +130,7 @@ def process_tool_filter(
     allow_write: bool = None,
     filter_path: str = None,
     tool_registry: dict = None,
+    multi_mode: bool = False,
 ) -> None:
     """Process tool filter configuration from a YAML file and environment variables.
 
@@ -144,6 +145,9 @@ def process_tool_filter(
         allow_write: If True, allow tools with PUT/POST methods
         filter_path: Path to the YAML filter configuration file
         tool_registry: The tool registry to filter.
+        multi_mode: When True, tools marked ``multi_only`` are auto-added to the
+            enabled allowlist so the category filter does not drop them. They still
+            respect explicit ``disabled_tools`` / ``disabled_tools_regex``.
     """
     try:
         # Create display name lookup
@@ -290,6 +294,14 @@ def process_tool_filter(
         if not allow_write:
             apply_write_filter(tool_registry)
 
+        # ``multi_only`` tools are mode-bound. In single mode, drop them up front so
+        # they never leak through (e.g. via an explicit ``enabled_tools`` entry). In
+        # multi mode they bypass the category-based allowlist below.
+        if not multi_mode:
+            for tool_name in list(tool_registry.keys()):
+                if tool_registry[tool_name].get('multi_only'):
+                    tool_registry.pop(tool_name, None)
+
         # Process tools from categories and regex patterns
         enabled_tools_from_categories = process_categories(
             enabled_category_list, category_to_tools
@@ -320,6 +332,15 @@ def process_tool_filter(
             all_enabled_tools.update(
                 validate_tools(enabled_tools_from_regex, display_name, 'enabled_tools_regex')
             )
+
+            # Auto-include ``multi_only`` tools (e.g. ``ListClustersTool``) — they are
+            # mode-inherent and not part of any user-configurable category, so the
+            # category-based allowlist would drop them. Explicit ``disabled_*`` filters
+            # below still apply.
+            if multi_mode:
+                for tool_key, tool_info in tool_registry.items():
+                    if tool_info.get('multi_only'):
+                        all_enabled_tools.add(tool_key.lower())
 
             # Remove tools not in the enabled list
             for tool_name in list(tool_registry.keys()):
@@ -353,11 +374,45 @@ def process_tool_filter(
         logging.error(f'Error processing tool filter: {str(e)}')
 
 
+def _strip_schema_fields(schema: dict, fields) -> None:
+    """Remove ``fields`` from a JSON schema's ``properties`` and ``required`` in place.
+
+    Caller is responsible for ensuring ``schema['properties']`` exists.
+    """
+    for field in fields:
+        schema['properties'].pop(field, None)
+        if 'required' in schema and field in schema['required']:
+            schema['required'].remove(field)
+
+
+def _build_multi_mode_tool(info: dict, override_fields: frozenset) -> dict:
+    """Return a copy of ``info`` with connection override fields stripped from its schema.
+
+    Multi mode uses ``opensearch_cluster_name`` to select a pre-configured cluster, so
+    per-call connection overrides are not applicable and must not appear in tool schemas.
+    The wrapper and schema dict are both copied so the returned tool is fully isolated
+    from the source ``TOOL_REGISTRY``.
+    """
+    tool_info = info.copy()
+    schema = tool_info['input_schema'].copy()
+    if 'properties' in schema:
+        _strip_schema_fields(schema, override_fields)
+    tool_info['input_schema'] = schema
+    return tool_info
+
+
 async def get_tools(tool_registry: dict, config_file_path: str = '') -> dict:
     """Filter and return available tools based on server mode and OpenSearch version.
 
-    In 'multi' mode, returns all tools without filtering. In 'single' mode, filters tools
-    based on OpenSearch version compatibility and removes base tool arguments from schemas.
+    In ``single`` mode, applies YAML / environment tool filters, filters tools by the
+    connected OpenSearch version, and adjusts input schemas for dynamic vs
+    pre-configured connections.
+
+    In ``multi`` mode, applies the same YAML / environment tool filters, strips per-call
+    connection override fields from schemas (clusters are pre-configured), and keeps
+    ``opensearch_cluster_name``. Version compatibility is not enforced here because
+    clusters may run different versions; each tool invocation re-checks compatibility
+    against the targeted cluster via ``check_tool_compatibility``.
 
     Args:
         tool_registry (dict): The tool registry to filter.
@@ -368,7 +423,10 @@ async def get_tools(tool_registry: dict, config_file_path: str = '') -> dict:
     """
     # Inline import to avoid circular dependency at module load time
     # (server_instructions imports clusters_information which is loaded after tools)
-    from mcp_server_opensearch.server_instructions import CONNECTION_OVERRIDE_FIELDS, is_dynamic_mode_enabled
+    from mcp_server_opensearch.server_instructions import (
+        CONNECTION_OVERRIDE_FIELDS,
+        is_dynamic_mode_enabled,
+    )
 
     # Get the current mode from global state
     mode = get_mode()
@@ -377,25 +435,6 @@ async def get_tools(tool_registry: dict, config_file_path: str = '') -> dict:
     # This needs to be done in both single and multi mode
     resolved_allow_write = _resolve_allow_write_setting(config_file_path)
     set_allow_write_setting(resolved_allow_write)
-
-    # In multi mode, always strip connection override fields — dynamic per-call
-    # connection params are a single-mode feature. Multi mode uses
-    # opensearch_cluster_name to select a pre-configured cluster.
-    if mode == 'multi':
-        for name, info in tool_registry.items():
-            schema = info['input_schema']
-            if 'properties' in schema:
-                for field in CONNECTION_OVERRIDE_FIELDS:
-                    schema['properties'].pop(field, None)
-                    if 'required' in schema and field in schema['required']:
-                        schema['required'].remove(field)
-        return tool_registry
-
-    enabled = {}
-
-    # Get OpenSearch version for compatibility checking (only in single mode)
-    version = await get_opensearch_version(baseToolArgs(opensearch_cluster_name=''))
-    logging.info(f'Connected OpenSearch version: {version}')
 
     env_config = {
         'enabled_tools': os.getenv('OPENSEARCH_ENABLED_TOOLS', ''),
@@ -412,21 +451,33 @@ async def get_tools(tool_registry: dict, config_file_path: str = '') -> dict:
     if config_file_path and any(env_config.values()):
         logging.warning('Both config file and environment variables are set. Using config file.')
 
-    # Apply tool filtering, update the TOOL_REGISTRY
+    # Apply tool filtering — mutates ``tool_registry`` in place. ``multi_mode=True``
+    # tells ``process_tool_filter`` to auto-include ``multi_only`` tools in the enabled
+    # allowlist (they are mode-inherent and not part of any category) while still
+    # respecting explicit ``disabled_tools`` / ``disabled_tools_regex``.
     process_tool_filter(
         tool_registry=tool_registry,
         filter_path=config_file_path if config_file_path else None,
+        multi_mode=True if mode == 'multi' else False,
         **{k: v for k, v in env_config.items() if not config_file_path},
     )
+
+    enabled = {}
+
+    if mode == 'multi':
+        for info in tool_registry.values():
+            tool_info = _build_multi_mode_tool(info, CONNECTION_OVERRIDE_FIELDS)
+            enabled[tool_info['display_name']] = tool_info
+        return enabled
+
+    # Get OpenSearch version for compatibility checking (single mode only)
+    version = await get_opensearch_version(baseToolArgs(opensearch_cluster_name=''))
+    logging.info(f'Connected OpenSearch version: {version}')
 
     for name, info in tool_registry.items():
         # Create a copy to avoid modifying the original tool info
         tool_info = info.copy()
         tool_name = tool_info['display_name']
-
-        # Skip multi-only tools in single mode
-        if info.get('multi_only') and mode != 'multi':
-            continue
 
         # If tool is not compatible with the current OpenSearch version, skip, don't enable
         if not is_tool_compatible(version, info):
@@ -443,13 +494,8 @@ async def get_tools(tool_registry: dict, config_file_path: str = '') -> dict:
         if 'properties' in schema:
             dynamic = is_dynamic_mode_enabled()
             _always_hidden = {'opensearch_cluster_name'}
-            fields_to_strip = _always_hidden | (
-                set() if dynamic else CONNECTION_OVERRIDE_FIELDS
-            )
-            for field in fields_to_strip:
-                schema['properties'].pop(field, None)
-                if 'required' in schema and field in schema['required']:
-                    schema['required'].remove(field)
+            fields_to_strip = _always_hidden | (set() if dynamic else CONNECTION_OVERRIDE_FIELDS)
+            _strip_schema_fields(schema, fields_to_strip)
 
             # In dynamic mode, opensearch_url is functionally required at runtime
             # even though baseToolArgs declares it Optional. Mark it required in

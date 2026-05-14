@@ -328,7 +328,9 @@ tool_filters:
 export OPENSEARCH_ENABLED_CATEGORIES="search_relevance,my_custom_category"
 ```
 
-In multi-cluster mode, all tools are returned without category filtering.
+Category filtering applies in both single and multi-cluster modes. Tools marked `multi_only` (e.g. `ListClustersTool`) bypass the category-based enabled allowlist in multi mode since they are inherent to that mode, but they still respect explicit `disabled_tools` / `disabled_tools_regex` so operators can opt out.
+
+In multi-cluster mode, OpenSearch version compatibility is not enforced when listing tools, because clusters in the config may run different versions. Each tool invocation re-checks compatibility against the targeted cluster at call time via `check_tool_compatibility`.
 
 ### 6. Tests
 
